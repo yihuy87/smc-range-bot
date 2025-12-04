@@ -51,3 +51,17 @@ SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.0015"))
 RR1 = float(os.getenv("RR1", "1.0"))
 RR2 = float(os.getenv("RR2", "2.0"))
 RR3 = float(os.getenv("RR3", "3.0"))
+
+# ========== RANGE SETTINGS ==========
+
+# Timeframe entry (default 5m)
+RANGE_ENTRY_TF = os.getenv("RANGE_ENTRY_TF", "5m")
+
+# HTF filter ON / OFF
+RANGE_USE_HTF_FILTER = os.getenv("RANGE_USE_HTF_FILTER", "true").lower() == "true"
+
+# Max usia setup range (berapa candle 5m)
+RANGE_MAX_ENTRY_AGE_CANDLES = int(os.getenv("RANGE_MAX_ENTRY_AGE_CANDLES", "6"))
+
+# Minimal RR ke TP2 untuk lolos sinyal
+RANGE_MIN_RR_TP2 = float(os.getenv("RANGE_MIN_RR_TP2", "2.0"))
