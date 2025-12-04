@@ -203,4 +203,3 @@ async def run_range_bot():
             await asyncio.sleep(5)
 
     print("run_range_bot selesai karena state.running = False")
-```0
