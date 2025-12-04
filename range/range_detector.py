@@ -1,113 +1,104 @@
 # range/range_detector.py
-# Deteksi setup RANGE-REVERSION + bangun Entry/SL/TP.
+# Deteksi setup RANGE (sideways + breakout) + bangun Entry/SL/TP.
 
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from binance.ohlc_buffer import Candle
+from core.range_settings import range_settings
 from range.htf_context import get_htf_context
 from range.range_tiers import evaluate_signal_quality
 
-# range_settings disimpan di core, tapi kita pakai getattr supaya aman
-try:
-    from core.range_settings import range_settings as _rs  # type: ignore[attr-defined]
-except Exception:  # fallback kalau belum ada
-    _rs = None
 
-
-def _get_min_rr_tp2() -> float:
-    if _rs is None:
-        return 1.8
-    return float(getattr(_rs, "min_rr_tp2", 1.8))
-
-
-def _get_max_entry_age_candles() -> int:
-    if _rs is None:
-        return 6
-    return int(getattr(_rs, "max_entry_age_candles", 6))
-
-
-def _avg_range_height(candles: List[Candle], lookback: int = 60) -> float:
-    sub = candles[-lookback:] if len(candles) > lookback else candles
-    if not sub:
-        return 0.0
-    total = 0.0
-    for c in sub:
-        total += c["high"] - c["low"]
-    return total / len(sub)
+def _candles_to_arrays(candles: List[Candle]) -> Dict[str, np.ndarray]:
+    """Convert list candle ke NumPy array untuk analisa cepat."""
+    o = np.array([c["open"] for c in candles], dtype=float)
+    h = np.array([c["high"] for c in candles], dtype=float)
+    l = np.array([c["low"] for c in candles], dtype=float)
+    c_ = np.array([c["close"] for c in candles], dtype=float)
+    v = np.array([c["volume"] for c in candles], dtype=float)
+    return {"open": o, "high": h, "low": l, "close": c_, "volume": v}
 
 
 def _detect_range_zone(
-    candles: List[Candle],
-    lookback: int = 60,
-) -> Optional[Tuple[float, float, str]]:
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+) -> Optional[Tuple[float, float, float]]:
     """
-    Deteksi range sederhana di lookback terakhir.
-    Return (range_low, range_high, side) atau None.
-    side:
-      - "long"  → harga di zona bawah range (discount) → cari LONG
-      - "short" → harga di zona atas range (premium)  → cari SHORT
+    Deteksi area range recent:
+    - pakai N candle terakhir (tanpa candle breakout)
+    - cari high/low & tinggi range
+    - pastikan tinggi range relatif kecil (squeeze)
     """
-    if len(candles) < lookback:
+    n = len(closes)
+    N = range_settings.range_lookback
+    min_n = range_settings.min_range_candles
+
+    if n < min_n + 5:
         return None
 
-    recent = candles[-lookback:]
-    highs = [c["high"] for c in recent]
-    lows = [c["low"] for c in recent]
-    closes = [c["close"] for c in recent]
+    # gunakan N candle sebelum candle terakhir (last candle = kandidat breakout)
+    end = n - 1
+    start = max(0, end - N)
+    h_seg = highs[start:end]
+    l_seg = lows[start:end]
+    c_seg = closes[start:end]
 
-    if not highs or not lows or not closes:
+    if h_seg.size < min_n:
         return None
 
-    r_high = max(highs)
-    r_low = min(lows)
-    last_price = closes[-1]
-
-    width = r_high - r_low
-    if width <= 0:
+    range_high = float(np.max(h_seg))
+    range_low = float(np.min(l_seg))
+    if range_high <= range_low:
         return None
 
-    mid = (r_high + r_low) * 0.5
-    if mid <= 0:
+    height = range_high - range_low
+    mid = (range_high + range_low) * 0.5
+    last_price = float(closes[-1])
+
+    # tinggi range relatif terhadap harga (persen)
+    height_pct = abs(height / last_price) * 100.0 if last_price != 0 else 0.0
+    if height_pct <= 0:  # aneh
         return None
 
-    range_width_pct = (width / mid) * 100.0
-
-    # Range terlalu sempit → noise, terlalu lebar → bukan range intraday sehat
-    if range_width_pct < 0.4 or range_width_pct > 3.0:
+    # filter: range harus "rapat" (squeeze) tapi tidak super kecil
+    if height_pct > range_settings.max_range_height_pct:
         return None
 
-    # Zona bawah & atas (35% dari range)
-    bottom_zone = r_low + width * 0.35
-    top_zone = r_high - width * 0.35
-
-    if last_price <= bottom_zone:
-        side = "long"
-    elif last_price >= top_zone:
-        side = "short"
-    else:
+    # tambahan: stdev close di dalam range harus kecil (sideways)
+    stdev = float(np.std(c_seg))
+    if stdev <= 0:
+        return None
+    # rasio stdev terhadap tinggi range
+    if stdev / height > 0.6:
+        # terlalu noisy, bukan range rapi
         return None
 
-    return r_low, r_high, side
+    return range_low, range_high, height_pct
 
 
-def recommend_leverage_range(sl_pct: float) -> Tuple[float, float]:
+def _detect_breakout(
+    range_low: float,
+    range_high: float,
+    last_close: float,
+) -> Optional[str]:
     """
-    Rekomendasi leverage rentang berdasarkan SL%.
-    Mirip pola bot-bot sebelumnya.
+    Deteksi apakah last_close breakout dari range.
+    Return: "long" / "short" / None
     """
-    if sl_pct <= 0:
-        return 5.0, 10.0
+    if last_close <= 0 or range_high <= range_low:
+        return None
 
-    if sl_pct <= 0.25:
-        return 25.0, 40.0
-    elif sl_pct <= 0.50:
-        return 15.0, 25.0
-    elif sl_pct <= 0.80:
-        return 8.0, 15.0
-    elif sl_pct <= 1.20:
-        return 5.0, 8.0
-    else:
-        return 3.0, 5.0
+    # buffer kecil supaya tidak ke-trigger hanya karena wick kecil
+    eps = range_high * 0.0005
+
+    if last_close > range_high + eps:
+        return "long"
+    if last_close < range_low - eps:
+        return "short"
+    return None
 
 
 def _build_levels(
@@ -115,34 +106,35 @@ def _build_levels(
     range_low: float,
     range_high: float,
     last_price: float,
-    rr1: float = 1.2,
-    rr2: float = 2.0,
-    rr3: float = 3.0,
+    rr1: float = 1.5,
+    rr2: float = 2.5,
+    rr3: float = 4.0,
 ) -> Dict[str, float]:
     """
-    Bangun Entry/SL/TP untuk RANGE-REVERSION:
-    - Entry dekat tepi range (bukan di tengah).
-    - SL sedikit di luar range (buffer dinamis).
-    - TP pakai kelipatan R (RR1/RR2/RR3).
+    Bangun Entry/SL/TP:
+    - Entry = retest ke batas range (bukan ke harga terakhir)
+    - SL = sisi seberang range ± buffer dinamis
+    - TP = multiple dari risk (R)
     """
-    width = range_high - range_low
-    if width <= 0:
-        # fallback kecil
-        width = abs(last_price) * 0.003
-
-    buffer = max(width * 0.15, abs(last_price) * 0.001)
-
     if side == "long":
-        entry = min(last_price, range_low + width * 0.10)
+        entry = range_high  # buy di retest breakout
+        # buffer di bawah range_low
+        buffer = max(range_low * 0.0015, abs(entry) * 0.0005)
         sl = range_low - buffer
         risk = entry - sl
     else:
-        entry = max(last_price, range_high - width * 0.10)
+        entry = range_low  # sell di retest breakdown
+        buffer = max(range_high * 0.0015, abs(entry) * 0.0005)
         sl = range_high + buffer
         risk = sl - entry
 
     if risk <= 0:
+        # fallback safety
         risk = abs(entry) * 0.003
+        if side == "long":
+            sl = entry - risk
+        else:
+            sl = entry + risk
 
     # TP berdasarkan RR
     if side == "long":
@@ -169,21 +161,55 @@ def _build_levels(
     }
 
 
+def recommend_leverage_range(sl_pct: float) -> Tuple[float, float]:
+    """
+    Rekomendasi leverage rentang berdasarkan SL%.
+    Sama gaya dengan bot-bot sebelumnya.
+    """
+    if sl_pct <= 0:
+        return 5.0, 10.0
+
+    if sl_pct <= 0.25:
+        return 25.0, 40.0
+    elif sl_pct <= 0.50:
+        return 15.0, 25.0
+    elif sl_pct <= 0.80:
+        return 8.0, 15.0
+    elif sl_pct <= 1.20:
+        return 5.0, 8.0
+    else:
+        return 3.0, 5.0
+
+
 def analyze_symbol_range(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     """
-    Analyzer utama RANGE ENGINE untuk satu symbol.
-    Dipanggil setiap candle 5m close dari binance_stream.
+    Analisa RANGE untuk satu symbol pakai data 5m (NumPy):
+    - deteksi sideways recent
+    - cek breakout candle terakhir
+    - bangun Entry/SL/TP
+    - cek RR & SL%
+    - cek konteks HTF (opsional)
+    - skor & tier → hanya kirim jika >= min_tier
     """
-    if len(candles_5m) < 60:
+    if len(candles_5m) < range_settings.min_range_candles + 5:
         return None
 
-    # Deteksi range & sisi (long/short)
-    detected = _detect_range_zone(candles_5m, lookback=60)
-    if not detected:
+    arr = _candles_to_arrays(candles_5m)
+    highs = arr["high"]
+    lows = arr["low"]
+    closes = arr["close"]
+
+    last_price = float(closes[-1])
+
+    range_info = _detect_range_zone(highs, lows, closes)
+    if not range_info:
         return None
 
-    range_low, range_high, side = detected
-    last_price = candles_5m[-1]["close"]
+    range_low, range_high, height_pct = range_info
+
+    side = _detect_breakout(range_low, range_high, last_price)
+    if not side:
+        return None
 
     levels = _build_levels(side, range_low, range_high, last_price)
 
@@ -194,29 +220,31 @@ def analyze_symbol_range(symbol: str, candles_5m: List[Candle]) -> Optional[Dict
     tp3 = levels["tp3"]
     sl_pct = levels["sl_pct"]
 
-    # Validasi RR TP2
     risk = abs(entry - sl)
     if risk <= 0:
         return None
 
+    # RR ke TP2 (wajib minimal)
     rr_tp2 = abs(tp2 - entry) / risk
-    min_rr = _get_min_rr_tp2()
+    min_rr = range_settings.min_rr_tp2
     rr_ok = rr_tp2 >= min_rr
 
     # HTF context
-    htf_ctx = get_htf_context(symbol)
+    htf_ctx = get_htf_context(symbol) if range_settings.use_htf_filter else {
+        "htf_ok_long": True,
+        "htf_ok_short": True,
+    }
     if side == "long":
         htf_alignment = bool(htf_ctx.get("htf_ok_long", True))
     else:
         htf_alignment = bool(htf_ctx.get("htf_ok_short", True))
 
-    # Meta untuk scorring
+    # meta buat skoring
     meta = {
         "has_range": True,
-        "clean_swing": True,       # versi pertama: asumsi range rapi
-        "breakout_clear": True,    # nanti bisa diperketat
-        "fvg_ok": True,            # placeholder; kita anggap ada inefficiency minor
+        "breakout_ok": True,
         "rr_ok": rr_ok,
+        "vol_ok": True,
         "sl_pct": sl_pct,
         "htf_alignment": htf_alignment,
     }
@@ -236,8 +264,8 @@ def analyze_symbol_range(symbol: str, candles_5m: List[Candle]) -> Optional[Dict
     lev_text = f"{lev_min:.0f}x–{lev_max:.0f}x"
     sl_pct_text = f"{sl_pct:.2f}%"
 
-    # Validitas sinyal (pakai max_entry_age_candles dari settings)
-    max_age_candles = _get_max_entry_age_candles()
+    # validitas sinyal
+    max_age_candles = range_settings.max_entry_age_candles
     approx_minutes = max_age_candles * 5
     valid_text = f"±{approx_minutes} menit" if approx_minutes > 0 else "singkat"
 
@@ -247,10 +275,10 @@ def analyze_symbol_range(symbol: str, candles_5m: List[Candle]) -> Optional[Dict
         example_balance = 100.0
         example_pos = pos_mult * example_balance
         risk_calc = (
-            f"Risk Calc (contoh risiko 1%):\n"
+            "Risk Calc (contoh risiko 1%):\n"
             f"• SL : {sl_pct_text} → nilai posisi ≈ (1% / SL%) × balance ≈ {pos_mult:.1f}× balance\n"
             f"• Contoh balance 100 USDT → posisi ≈ {example_pos:.0f} USDT\n"
-            f"(sesuaikan dengan balance & leverage kamu)"
+            "(sesuaikan dengan balance & leverage kamu)"
         )
     else:
         risk_calc = "Risk Calc: SL% tidak valid (0), abaikan kalkulasi ini."
@@ -262,7 +290,7 @@ def analyze_symbol_range(symbol: str, candles_5m: List[Candle]) -> Optional[Dict
         f"TP1   : `{tp1:.6f}`\n"
         f"TP2   : `{tp2:.6f}`\n"
         f"TP3   : `{tp3:.6f}`\n"
-        f"Model : Range Reversion Engine\n"
+        "Model : Range Squeeze → Breakout Retest\n"
         f"Rekomendasi Leverage : {lev_text} (SL {sl_pct_text})\n"
         f"Validitas Entry : {valid_text}\n"
         f"Tier : {tier} (Score {score})\n"
@@ -282,6 +310,9 @@ def analyze_symbol_range(symbol: str, candles_5m: List[Candle]) -> Optional[Dict
         "lev_max": lev_max,
         "tier": tier,
         "score": score,
+        "range_low": range_low,
+        "range_high": range_high,
+        "range_height_pct": height_pct,
         "htf_context": htf_ctx,
         "message": text,
-}
+    }
