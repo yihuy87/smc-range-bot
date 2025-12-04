@@ -1,64 +1,68 @@
 # range/range_tiers.py
-# Skoring & tiering untuk Bot 3 — Range Manipulation Engine.
+# Evaluasi kualitas sinyal Range Manipulation Engine Bot 3
 
 from typing import Dict
-from range.range_settings import settings
+from core.bot_state import state
 
 
 def score_signal(meta: Dict) -> int:
     """
-    META berisi:
-    - range_ok: bool     (range jelas & valid)
-    - sweep_ok: bool     (ada manipulasi arah / liquidity grab)
-    - displacement_ok: bool
-    - entry_zone_ok: bool (mid-range entry)
-    - rr_ok: bool
-    - htf_ok: bool
-    - sl_pct: float
+    Skoring kualitas sinyal Bot 3 berdasarkan meta:
+    
+    meta wajib berisi:
+      - has_range: bool
+      - sweep_ok: bool
+      - displacement_ok: bool
+      - sl_ok: bool
+      - rr_ok: bool
+      - volatility_ok: bool
+      - structure_ok: bool
+      - sl_pct: float
     """
 
     score = 0
 
-    # Range valid (syarat utama bot 3)
-    if meta.get("range_ok"):
-        score += 30
+    # -------------------------
+    # Core Criteria
+    # -------------------------
+    if meta.get("has_range"):
+        score += 25
 
-    # Sweep / liquidity grab
     if meta.get("sweep_ok"):
         score += 25
 
-    # Displacement keluar dari range → sangat penting
     if meta.get("displacement_ok"):
         score += 20
 
-    # Entry tepat di MID zone (anti manipulasi)
-    if meta.get("entry_zone_ok"):
+    if meta.get("structure_ok"):
         score += 15
 
-    # RR sehat
-    if meta.get("rr_ok"):
-        score += 20
-
-    # SL% sehat (mirip bot 1)
-    sl_pct = float(meta.get("sl_pct", 0.0))
-    if settings.min_sl_pct <= sl_pct <= settings.max_sl_pct:
+    if meta.get("volatility_ok"):
         score += 10
 
-    # HTF alignment
-    if meta.get("htf_ok"):
+    if meta.get("rr_ok"):
         score += 15
 
-    # Max cap
-    return min(score, 150)
+    # -------------------------
+    # SL Quality Scoring
+    # Bonus untuk SL sehat (0.25–0.85%)
+    # -------------------------
+    sl_pct = float(meta.get("sl_pct", 99))
+    if 0.25 <= sl_pct <= 0.85:
+        score += 10
+    elif sl_pct < 0.20:
+        score -= 5
+    elif sl_pct > 1.20:
+        score -= 5
+
+    # clamp
+    score = max(0, min(score, 150))
+    return score
 
 
 def tier_from_score(score: int) -> str:
     """
-    Tier Bot 3:
-    - A+ : >= 120
-    - A  : 100–119
-    - B  : 80–99
-    - NONE: < 80
+    Tier berdasarkan score (konsisten dengan bot 1 & bot 2).
     """
     if score >= 120:
         return "A+"
@@ -70,18 +74,28 @@ def tier_from_score(score: int) -> str:
         return "NONE"
 
 
-def evaluate_signal_quality(meta: Dict) -> Dict:
+def should_send_tier(tier: str) -> bool:
     """
-    Wrapper standar.
+    Bandingkan kualitas tier dengan state.min_tier.
     """
+    t_order = {"NONE": 0, "B": 1, "A": 2, "A+": 3}
+    min_tier = state.min_tier or "A"
+    return t_order.get(tier, 0) >= t_order.get(min_tier, 2)
+
+
+def evaluate(meta: Dict) -> Dict:
+    """
+    Wrapper untuk digunakan oleh range_detector.
+    Return dict lengkap:
+      { score, tier, should_send }
+    """
+
     score = score_signal(meta)
     tier = tier_from_score(score)
-
-    # Default minimal tier A (seperti bot 1)
-    should_send = tier in ("A", "A+")
+    send = should_send_tier(tier)
 
     return {
         "score": score,
         "tier": tier,
-        "should_send": should_send,
+        "should_send": send,
     }
