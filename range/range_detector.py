@@ -3,7 +3,7 @@
 
 from typing import List, Dict, Optional, Tuple
 from binance.ohlc_buffer import Candle
-from core.range_settings import settings
+from core.range_settings import range_settings
 from range.range_tiers import evaluate_signal_quality
 from range.htf_context import get_htf_context
 
