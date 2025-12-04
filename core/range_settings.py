@@ -1,25 +1,27 @@
 # core/range_settings.py
-# Setting utama engine RANGE BOT (Bot 3)
-
 from dataclasses import dataclass
+
+from config import (
+    RANGE_ENTRY_TF,
+    RANGE_USE_HTF_FILTER,
+    RANGE_MAX_ENTRY_AGE_CANDLES,
+    RANGE_MIN_RR_TP2,
+    MIN_TIER_TO_SEND,
+)
 
 
 @dataclass
 class RangeSettings:
-    # Berapa candle terakhir untuk mendeteksi range
-    lookback: int = 120
+    entry_tf: str = RANGE_ENTRY_TF
+    use_htf_filter: bool = RANGE_USE_HTF_FILTER
+    max_entry_age_candles: int = RANGE_MAX_ENTRY_AGE_CANDLES
+    min_rr_tp2: float = RANGE_MIN_RR_TP2
+    min_tier_to_send: str = MIN_TIER_TO_SEND
 
-    # Minimal lebar range secara persentase (%) agar dianggap valid
-    min_range_pct: float = 0.35
-
-    # RR minimal terhadap breakout
-    min_rr_break: float = 1.8
-
-    # Usia maksimal setup (candle 5m)
-    max_age_candles: int = 6  # 6 candle = 30 menit
-
-    # Filter HTF boleh hidup/mati
-    use_htf_filter: bool = True
+    # tambahan internal (tidak dari .env)
+    range_lookback: int = 40          # jumlah candle untuk deteksi range
+    min_range_candles: int = 30       # minimal candle yang dianggap range
+    max_range_height_pct: float = 0.8 # maksimum tinggi range (dlm %) dibanding harga
 
 
 range_settings = RangeSettings()
